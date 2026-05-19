@@ -148,10 +148,10 @@ const defaultState = {
     active: false,
     questionNote: "C",
     selected: [],
-    checked: false,
-    revealed: false,
+    completed: false,
+    guesses: { correct: 0, incorrect: 0 },
     scoreText: "",
-    stats: { started: 0, checked: 0, correctSelections: 0, incorrectSelections: 0, missed: 0 }
+    stats: { gamesStarted: 0, gamesCompleted: 0, correctGuesses: 0, incorrectGuesses: 0 }
   }
 };
 
@@ -187,6 +187,8 @@ class Store extends EventTarget {
         ...(state.quiz || {}),
         questionNote: normalizeNote(state.quiz?.questionNote || "C"),
         selected: Array.isArray(state.quiz?.selected) ? state.quiz.selected : [],
+        completed: Boolean(state.quiz?.completed),
+        guesses: { ...defaultState.quiz.guesses, ...(state.quiz?.guesses || {}) },
         stats: { ...defaultState.quiz.stats, ...(state.quiz?.stats || {}) }
       }
     };
@@ -264,17 +266,13 @@ class FretboardApp extends BaseElement {
     this.innerHTML = `
       <div class="app-shell">
         <header class="topbar">
-          <div class="brand">
-            <h1>Fretboard Trainer</h1>
-            <p>Notes, scales, chords, and position practice</p>
-          </div>
+          <mode-selector></mode-selector>
           <div class="top-actions">
             <button type="button" data-action="settings" aria-haspopup="dialog">Settings</button>
           </div>
         </header>
         <main class="content">
           <section class="controls" aria-label="Fretboard controls">
-            <mode-selector></mode-selector>
             <note-filter></note-filter>
             <scale-panel></scale-panel>
             <chord-panel></chord-panel>
@@ -415,12 +413,9 @@ class ModeSelector extends BaseElement {
       ["quiz", "Quiz"]
     ];
     this.innerHTML = `
-      <section class="panel">
-        <h2>Mode</h2>
-        <div class="segmented" role="group" aria-label="Display mode">
-          ${modes.map(([value, label]) => `<button type="button" data-mode="${value}" aria-pressed="${store.state.mode === value}">${label}</button>`).join("")}
-        </div>
-      </section>
+      <div class="segmented" role="group" aria-label="Display mode">
+        ${modes.map(([value, label]) => `<button type="button" data-mode="${value}" aria-pressed="${store.state.mode === value}">${label}</button>`).join("")}
+      </div>
     `;
     this.querySelectorAll("[data-mode]").forEach((button) => {
       button.addEventListener("click", () => this.emit("app-update", { mode: button.dataset.mode }));
@@ -511,24 +506,18 @@ class QuizPanel extends BaseElement {
       this.innerHTML = "";
       return;
     }
-    const stats = quiz.stats;
+    const answerTotal = getAnswerKeys(store.state).size;
+    const found = quiz.selected.filter((key) => getAnswerKeys(store.state).has(key)).length;
+    const buttonLabel = quiz.active ? "Stop quiz" : "Start quiz";
     this.innerHTML = `
       <section class="panel">
         <h2>Quiz</h2>
         <div class="quiz-status" aria-live="polite">
-          <strong>${quiz.active ? `Find all ${escapeHtml(displayNote(quiz.questionNote, accidental))} notes` : "Start a note-finding quiz"}</strong>
-          <span class="score">${escapeHtml(quiz.scoreText || "Tap positions to reveal notes, then check your answer.")}</span>
-          <div class="stat-grid">
-            <span class="stat"><b>${stats.started}</b>Started</span>
-            <span class="stat"><b>${stats.checked}</b>Checked</span>
-            <span class="stat"><b>${stats.correctSelections}</b>Correct</span>
-          </div>
+          <strong>${quiz.active ? `Find all ${escapeHtml(displayNote(quiz.questionNote, accidental))} notes` : "Quiz stopped"}</strong>
+          <span class="score">${escapeHtml(quiz.scoreText || (quiz.active ? `${found}/${answerTotal} found. Correct ${quiz.guesses.correct}, incorrect ${quiz.guesses.incorrect}.` : "Press Start quiz when you want a new round."))}</span>
         </div>
         <div class="button-row" style="margin-top: .75rem;">
-          <button type="button" class="primary" data-quiz="start">Start quiz</button>
-          <button type="button" data-quiz="check" ${quiz.active ? "" : "disabled"}>Check answer</button>
-          <button type="button" data-quiz="show" ${quiz.active ? "" : "disabled"}>Show answer</button>
-          <button type="button" data-quiz="next" ${quiz.active ? "" : "disabled"}>Next question</button>
+          <button type="button" class="${quiz.active ? "danger" : "primary"}" data-quiz="${quiz.active ? "stop" : "start"}">${buttonLabel}</button>
         </div>
       </section>
     `;
@@ -581,20 +570,20 @@ class FretboardView extends BaseElement {
     const isRoot = (state.mode === "scales" || state.mode === "chords") && pos.note === state.rootNote;
     const selected = quiz?.selected.includes(key);
     const correctAnswer = quiz && pos.note === quiz.questionNote;
-    const checked = quiz?.checked || quiz?.revealed;
+    const completed = quiz?.completed;
     const classes = [
       !isVisible ? "empty" : "",
       pos.fret === 0 ? "open" : ""
     ].filter(Boolean).join(" ");
     const buttonClasses = [
-      state.mode === "quiz" && !checked && !selected ? "hidden-note" : "",
+      state.mode === "quiz" && !selected ? "hidden-note" : "",
       isRoot ? "root" : "",
       selected ? "selected" : "",
-      checked && selected && correctAnswer ? "correct" : "",
-      checked && selected && !correctAnswer ? "incorrect" : "",
-      checked && !selected && correctAnswer ? "missed" : ""
+      selected && correctAnswer ? "correct" : "",
+      selected && !correctAnswer ? "incorrect" : "",
+      completed && !selected && correctAnswer ? "missed" : ""
     ].filter(Boolean).join(" ");
-    const label = state.mode === "quiz" && !checked && !selected ? "" : displayNote(pos.note, state.accidental);
+    const label = state.mode === "quiz" && !selected ? "" : displayNote(pos.note, state.accidental);
     return `
       <div class="position ${classes}" style="--note-color: ${NOTE_COLORS[pos.note]}">
         <button type="button" class="${buttonClasses}" data-position="${key}" aria-label="String ${pos.stringIndex + 1}, fret ${pos.fret}, ${escapeHtml(displayNote(pos.note, state.accidental))}" ${state.mode === "quiz" && quiz?.active ? "" : state.mode === "quiz" ? "disabled" : ""}>${escapeHtml(label)}</button>
@@ -614,13 +603,13 @@ function getModeLabel(state) {
   if (state.mode === "notes") return `Showing ${state.selectedNotes.map((note) => displayNote(note, state.accidental)).join(", ")}`;
   if (state.mode === "scales") return `${displayNote(state.rootNote, state.accidental)} ${state.selectedScale}`;
   if (state.mode === "chords") return `${displayNote(state.rootNote, state.accidental)} ${state.selectedChord}`;
-  if (state.mode === "quiz") return state.quiz.active ? `Find ${displayNote(state.quiz.questionNote, state.accidental)}` : "Quiz ready";
+  if (state.mode === "quiz") return state.quiz.active ? `Find ${displayNote(state.quiz.questionNote, state.accidental)}` : "Quiz stopped";
   return "All notes";
 }
 
 function handleQuizAction(action, position) {
   const state = store.state;
-  if (action === "start" || action === "next") {
+  if (action === "start") {
     const questionNote = NOTES[Math.floor(Math.random() * NOTES.length)];
     store.update({
       mode: "quiz",
@@ -629,46 +618,76 @@ function handleQuizAction(action, position) {
         active: true,
         questionNote,
         selected: [],
-        checked: false,
-        revealed: false,
+        completed: false,
+        guesses: { correct: 0, incorrect: 0 },
         scoreText: "",
-        stats: { ...state.quiz.stats, started: state.quiz.stats.started + 1 }
+        stats: { ...state.quiz.stats, gamesStarted: state.quiz.stats.gamesStarted + 1 }
       }
     });
+    return;
+  }
+  if (action === "stop") {
+    finishQuiz(state, "Stopped");
     return;
   }
   if (!state.quiz.active) return;
   if (action === "select" && position) {
-    if (state.quiz.checked || state.quiz.revealed) return;
+    if (state.quiz.selected.includes(position)) return;
     const selected = new Set(state.quiz.selected);
-    selected.has(position) ? selected.delete(position) : selected.add(position);
-    store.update({ quiz: { ...state.quiz, selected: [...selected] } });
-    return;
-  }
-  const answerKeys = getAnswerKeys(state);
-  const selected = new Set(state.quiz.selected);
-  const correct = [...selected].filter((key) => answerKeys.has(key)).length;
-  const incorrect = [...selected].filter((key) => !answerKeys.has(key)).length;
-  const missed = [...answerKeys].filter((key) => !selected.has(key)).length;
-  if (action === "check") {
-    store.update({
-      quiz: {
-        ...state.quiz,
-        checked: true,
-        scoreText: `${correct}/${answerKeys.size} correct, ${incorrect} incorrect, ${missed} missed`,
+    selected.add(position);
+    const answerKeys = getAnswerKeys(state);
+    const isCorrect = answerKeys.has(position);
+    const nextQuiz = {
+      ...state.quiz,
+      selected: [...selected],
+      guesses: {
+        correct: state.quiz.guesses.correct + (isCorrect ? 1 : 0),
+        incorrect: state.quiz.guesses.incorrect + (isCorrect ? 0 : 1)
+      }
+    };
+    const foundAll = [...answerKeys].every((key) => selected.has(key));
+    if (foundAll) {
+      const completedQuiz = {
+        ...nextQuiz,
+        active: false,
+        completed: true,
+        scoreText: scoreTextForQuiz(nextQuiz, answerKeys.size, "Complete"),
         stats: {
           ...state.quiz.stats,
-          checked: state.quiz.stats.checked + 1,
-          correctSelections: state.quiz.stats.correctSelections + correct,
-          incorrectSelections: state.quiz.stats.incorrectSelections + incorrect,
-          missed: state.quiz.stats.missed + missed
+          gamesCompleted: state.quiz.stats.gamesCompleted + 1,
+          correctGuesses: state.quiz.stats.correctGuesses + nextQuiz.guesses.correct,
+          incorrectGuesses: state.quiz.stats.incorrectGuesses + nextQuiz.guesses.incorrect
         }
+      };
+      store.update({ quiz: completedQuiz });
+      return;
+    }
+    store.update({ quiz: nextQuiz });
+    return;
+  }
+}
+
+function finishQuiz(state, reason) {
+  if (!state.quiz.active) return;
+  const answerKeys = getAnswerKeys(state);
+  store.update({
+    quiz: {
+      ...state.quiz,
+      active: false,
+      completed: true,
+      scoreText: scoreTextForQuiz(state.quiz, answerKeys.size, reason),
+      stats: {
+        ...state.quiz.stats,
+        gamesCompleted: state.quiz.stats.gamesCompleted + 1,
+        correctGuesses: state.quiz.stats.correctGuesses + state.quiz.guesses.correct,
+        incorrectGuesses: state.quiz.stats.incorrectGuesses + state.quiz.guesses.incorrect
       }
-    });
-  }
-  if (action === "show") {
-    store.update({ quiz: { ...state.quiz, checked: true, revealed: true, scoreText: `${answerKeys.size} ${displayNote(state.quiz.questionNote, state.accidental)} positions shown` } });
-  }
+    }
+  });
+}
+
+function scoreTextForQuiz(quiz, total, prefix) {
+  return `${prefix}. Found ${quiz.guesses.correct}/${total}; incorrect guesses ${quiz.guesses.incorrect}.`;
 }
 
 function getAnswerKeys(state) {
